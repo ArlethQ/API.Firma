@@ -118,6 +118,7 @@ public sealed class ApiEndpointsTests : IDisposable
         Assert.Equal("application/pdf", response.Content.Headers.ContentType?.MediaType);
         Assert.True(response.Headers.Contains("X-Documento-Original-SHA256"));
         Assert.True(response.Headers.Contains("X-Documento-Salida-SHA256"));
+        Assert.Equal("simple", Assert.Single(response.Headers.GetValues("X-Tipo-Sello")));
 
         var result = await response.Content.ReadAsByteArrayAsync();
         Assert.Equal("%PDF-"u8.ToArray(), result[..5]);
@@ -125,6 +126,11 @@ public sealed class ApiEndpointsTests : IDisposable
         using var stream = new MemoryStream(result);
         using var document = PdfReader.Open(stream, PdfDocumentOpenMode.Import);
         Assert.Single(document.Pages);
+        var annotations = document.Pages[0].Elements.GetArray("/Annots")!.Elements;
+        Assert.Single(annotations);
+        var widget = annotations.GetDictionary(0)!;
+        Assert.Equal("/Widget", widget.Elements.GetName("/Subtype"));
+        Assert.True(widget.Elements.GetRectangle("/Rect").Width > 0);
     }
 
     [Fact]
@@ -141,21 +147,67 @@ public sealed class ApiEndpointsTests : IDisposable
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
-    [Fact]
-    public async Task Stamp_WithTwoPositions_ReturnsOneSignedPdf()
+    [Theory]
+    [InlineData(1, false)]
+    [InlineData(2, false)]
+    [InlineData(1, true)]
+    [InlineData(2, true)]
+    public async Task Stamp_WithTwoPositions_StampsBothAndSignsOnce(int firstPage, bool advancedSeal)
     {
         using var client = CreateClient();
         client.DefaultRequestHeaders.Add("X-API-Key", ApiKey);
         using var content = CreateValidRequest(
-            posiciones: "[{\"pagina\":1,\"xMm\":20,\"yMm\":30,\"anchoMm\":80},{\"pagina\":1,\"xMm\":110,\"yMm\":160,\"anchoMm\":80}]");
+            posiciones: CreateTwoPositions(firstPage),
+            pdfBytes: CreatePdf(firstPage),
+            advancedSeal: advancedSeal);
 
         using var response = await client.PostAsync(
             "/api/documentos/estampar",
             content);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(
+            advancedSeal ? "avanzada" : "simple",
+            Assert.Single(response.Headers.GetValues("X-Tipo-Sello")));
         var result = await response.Content.ReadAsByteArrayAsync();
-        Assert.Equal("%PDF-"u8.ToArray(), result[..5]);
+        using var stream = new MemoryStream(result);
+        using var document = PdfReader.Open(stream, PdfDocumentOpenMode.Import);
+        var firstAnnotations = document.Pages[firstPage - 1].Elements.GetArray("/Annots")!.Elements;
+        var secondAnnotations = document.Pages[0].Elements.GetArray("/Annots")!.Elements;
+        Assert.Equal(firstPage == 1 ? 3 : 2, firstAnnotations.Count);
+        Assert.Equal(firstPage == 1 ? 3 : 1, secondAnnotations.Count);
+
+        var widget = firstAnnotations.GetDictionary(0)!;
+        Assert.Equal("/Widget", widget.Elements.GetName("/Subtype"));
+        var widgetRect = widget.Elements.GetRectangle("/Rect");
+        Assert.Equal(0, widgetRect.Width);
+        Assert.Equal(0, widgetRect.Height);
+
+        var firstStamp = firstAnnotations.GetDictionary(1)!;
+        var secondStamp = secondAnnotations.GetDictionary(secondAnnotations.Count - 1)!;
+        Assert.Equal("/Stamp", firstStamp.Elements.GetName("/Subtype"));
+        Assert.Equal("/Stamp", secondStamp.Elements.GetName("/Subtype"));
+        var firstRect = firstStamp.Elements.GetRectangle("/Rect");
+        var secondRect = secondStamp.Elements.GetRectangle("/Rect");
+        Assert.Equal(20 * 72d / 25.4d, firstRect.X1, 3);
+        Assert.Equal(110 * 72d / 25.4d, secondRect.X1, 3);
+        Assert.Equal(50.3 * 72d / 25.4d, firstRect.Width, 3);
+        Assert.Equal(50.3 * 72d / 25.4d * 0.39, firstRect.Height, 3);
+        Assert.Equal(firstRect.Width, secondRect.Width, 3);
+        Assert.Equal(firstRect.Height, secondRect.Height, 3);
+        Assert.Equal(
+            firstStamp.Elements.GetDictionary("/AP")!.Elements.GetReference("/N")!.ObjectNumber,
+            secondStamp.Elements.GetDictionary("/AP")!.Elements.GetReference("/N")!.ObjectNumber);
+
+        using var validationContent = CreateValidationRequest(result);
+        using var validationResponse = await client.PostAsync(
+            "/api/documentos/validar-firma",
+            validationContent);
+        Assert.Equal(HttpStatusCode.OK, validationResponse.StatusCode);
+        using var body = JsonDocument.Parse(await validationResponse.Content.ReadAsStreamAsync());
+        var signature = Assert.Single(body.RootElement.GetProperty("firmas").EnumerateArray());
+        Assert.True(signature.GetProperty("integridadValida").GetBoolean());
+        Assert.True(signature.GetProperty("cubreDocumentoCompleto").GetBoolean());
     }
 
     [Fact]
@@ -216,14 +268,7 @@ public sealed class ApiEndpointsTests : IDisposable
             signResponse.Content.Headers.ContentType?.MediaType);
         var signedPdf = await signResponse.Content.ReadAsByteArrayAsync();
 
-        using var validationContent = new MultipartFormDataContent();
-        var signedPdfContent = new ByteArrayContent(signedPdf);
-        signedPdfContent.Headers.ContentType =
-            new MediaTypeHeaderValue("application/pdf");
-        validationContent.Add(
-            signedPdfContent,
-            "pdf",
-            "documento-firmado.pdf");
+        using var validationContent = CreateValidationRequest(signedPdf);
 
         using var validationResponse = await client.PostAsync(
             "/api/documentos/validar-firma",
@@ -245,8 +290,10 @@ public sealed class ApiEndpointsTests : IDisposable
                 == "CADENA_NO_CONFIABLE");
     }
 
-    [Fact]
-    public async Task Stamp_WithPreviouslySignedPdf_PreservesPreviousSignature()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Stamp_WithPreviouslySignedPdf_PreservesPreviousSignature(bool addTwoStamps)
     {
         using var client = CreateClient();
         client.DefaultRequestHeaders.Add("X-API-Key", ApiKey);
@@ -258,17 +305,16 @@ public sealed class ApiEndpointsTests : IDisposable
         Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
         var firstSignedPdf = await firstResponse.Content.ReadAsByteArrayAsync();
 
-        using var secondRequest = CreateValidRequest(pdfBytes: firstSignedPdf);
+        var positions = addTwoStamps ? CreateTwoPositions(1) : null;
+        using var secondRequest = CreateValidRequest(posiciones: positions, pdfBytes: firstSignedPdf);
         using var secondResponse = await client.PostAsync(
             "/api/documentos/estampar",
             secondRequest);
         Assert.Equal(HttpStatusCode.OK, secondResponse.StatusCode);
         var secondSignedPdf = await secondResponse.Content.ReadAsByteArrayAsync();
+        Assert.True(secondSignedPdf.AsSpan().StartsWith(firstSignedPdf));
 
-        using var validationContent = new MultipartFormDataContent();
-        var pdfContent = new ByteArrayContent(secondSignedPdf);
-        pdfContent.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
-        validationContent.Add(pdfContent, "pdf", "documento-firmado.pdf");
+        using var validationContent = CreateValidationRequest(secondSignedPdf);
         using var validationResponse = await client.PostAsync(
             "/api/documentos/validar-firma",
             validationContent);
@@ -335,11 +381,19 @@ public sealed class ApiEndpointsTests : IDisposable
             BaseAddress = new Uri("https://localhost")
         });
 
+    private static string CreateTwoPositions(int firstPage) =>
+        JsonSerializer.Serialize(new[]
+        {
+            new { pagina = firstPage, xMm = 20, yMm = 30, anchoMm = 40 },
+            new { pagina = 1, xMm = 110, yMm = 160, anchoMm = 40 }
+        });
+
     private static MultipartFormDataContent CreateValidRequest(
         string password = CertificatePassword,
         string? posiciones = null,
         string pdfContentType = "application/pdf",
-        byte[]? pdfBytes = null)
+        byte[]? pdfBytes = null,
+        bool advancedSeal = false)
     {
         var content = new MultipartFormDataContent();
         var pdf = new ByteArrayContent(pdfBytes ?? CreatePdf());
@@ -351,6 +405,8 @@ public sealed class ApiEndpointsTests : IDisposable
         content.Add(pdf, "pdf", "documento.pdf");
         content.Add(certificate, "certificado", "certificado.p12");
         content.Add(new StringContent(password), "clave");
+        if (advancedSeal)
+            content.Add(new StringContent("true"), "selloAvanzado");
         content.Add(new StringContent("1"), "pagina");
         content.Add(new StringContent("100"), "xMm");
         content.Add(new StringContent("224.78"), "yMm");
@@ -360,10 +416,21 @@ public sealed class ApiEndpointsTests : IDisposable
         return content;
     }
 
-    private static byte[] CreatePdf()
+    private static MultipartFormDataContent CreateValidationRequest(byte[] pdf)
+    {
+        var content = new MultipartFormDataContent();
+        var pdfContent = new ByteArrayContent(pdf);
+        pdfContent.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
+        content.Add(pdfContent, "pdf", "documento-firmado.pdf");
+        return content;
+    }
+
+    private static byte[] CreatePdf(int pageCount = 1)
     {
         using var document = new PdfDocument();
-        document.AddPage();
+        for (var page = 0; page < pageCount; page++)
+            document.AddPage();
+
         using var stream = new MemoryStream();
         document.Save(stream, false);
         return stream.ToArray();

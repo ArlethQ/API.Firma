@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -28,7 +29,7 @@ public sealed class PdfStampService(
     private const double QrPhysicalWidthMm = 14.5;
     private const double StampLeftPaddingRatio = 0.014;
     private const double StampTextGapPoints = 4;
-    private const double StampFontSizePoints = 8;
+    private const float StampFontSizePoints = 8;
     private const double StampRasterDpi = 600;
     private const int MaxPlacements = 2;
 
@@ -91,7 +92,7 @@ public sealed class PdfStampService(
 
         try
         {
-            IncrementalPdfSignatureAppender.ValidateInput(originalBytes, request.Pagina);
+            IncrementalPdfSignatureAppender.ValidateInput(originalBytes, placements[0].Pagina);
         }
         catch (Exception exception)
         {
@@ -101,7 +102,7 @@ public sealed class PdfStampService(
                 {
                     IncrementalPdfSignatureAppender.ValidatePdfSharpInput(
                         originalBytes,
-                        request.Pagina);
+                        placements);
                     usePdfSharpIncrementalFallback = true;
                     logger.LogWarning(
                         exception,
@@ -122,33 +123,35 @@ public sealed class PdfStampService(
                     throw validationException;
                 }
             }
-
-            try
+            else
             {
-                pdfBytesForStamp = NormalizePdf(originalBytes);
-                IncrementalPdfSignatureAppender.ValidateInput(
-                    pdfBytesForStamp,
-                    request.Pagina);
-                pdfWasNormalized = true;
-                logger.LogWarning(
-                    exception,
-                    "El PDF original requiere normalización antes de la estampación: {OriginalBytes} bytes; PDF normalizado {NormalizedBytes} bytes",
-                    originalBytes.Length,
-                    pdfBytesForStamp.Length);
-            }
-            catch (Exception normalizationException)
-            {
-                var validationException = new StampValidationException(
-                    "pdf",
-                    "El PDF no tiene una estructura compatible para ser modificado.",
-                    normalizationException,
-                    diagnosticCode: "PDF_STRUCTURE_UNSUPPORTED");
-                await PersistPdfErrorAsync(
-                    request,
-                    originalBytes,
-                    "normalizar PDF",
-                    validationException);
-                throw validationException;
+                try
+                {
+                    pdfBytesForStamp = NormalizePdf(originalBytes);
+                    IncrementalPdfSignatureAppender.ValidateInput(
+                        pdfBytesForStamp,
+                        placements[0].Pagina);
+                    pdfWasNormalized = true;
+                    logger.LogWarning(
+                        exception,
+                        "El PDF original requiere normalización antes de la estampación: {OriginalBytes} bytes; PDF normalizado {NormalizedBytes} bytes",
+                        originalBytes.Length,
+                        pdfBytesForStamp.Length);
+                }
+                catch (Exception normalizationException)
+                {
+                    var validationException = new StampValidationException(
+                        "pdf",
+                        "El PDF no tiene una estructura compatible para ser modificado.",
+                        normalizationException,
+                        diagnosticCode: "PDF_STRUCTURE_UNSUPPORTED");
+                    await PersistPdfErrorAsync(
+                        request,
+                        originalBytes,
+                        "normalizar PDF",
+                        validationException);
+                    throw validationException;
+                }
             }
         }
 
@@ -206,7 +209,8 @@ public sealed class PdfStampService(
                 bundledCertificate.NotAfter.ToUniversalTime());
         }
 
-        var signatureData = CreateSignatureData(certificate);
+        var holderName = certificate.GetNameInfo(X509NameType.SimpleName, forIssuer: false);
+        var signatureData = CreateSignatureData(certificate.SubjectName, holderName);
 
         var signedAt = DateTimeOffset.Now;
         var qrPayload = qrTokenService.CreatePlainText(
@@ -214,11 +218,11 @@ public sealed class PdfStampService(
             signedAt.ToUniversalTime());
         ValidateQrPayloadSize(qrPayload);
         var qr = CreateQr(qrPayload);
-        var requestedStampWidthMm = placements[0].AnchoMm;
-        var stampWidthMm = Math.Max(
-            requestedStampWidthMm,
-            MinimumVisualStampWidthMm);
-        var placement = placements[0] with { AnchoMm = stampWidthMm };
+        var visualPlacements = placements.Select(placement => placement with
+        {
+            AnchoMm = Math.Max(placement.AnchoMm, MinimumVisualStampWidthMm)
+        }).ToArray();
+        var stampWidthMm = visualPlacements[0].AnchoMm;
         var qrModuleSizeMm = QrPhysicalWidthMm / qr.ModuleCount;
         logger.LogInformation(
             "QR calculado: contenido {PayloadBytes} bytes, {QrModules} módulos, módulo físico estimado {ModuleSizeMm:0.000} mm",
@@ -227,7 +231,9 @@ public sealed class PdfStampService(
             qrModuleSizeMm);
         var stampPng = CreateStampImage(
             qr.Png,
-            signatureData,
+            holderName,
+            request.SelloAvanzado ? certificate.Subject : null,
+            signedAt,
             stampWidthMm);
         logger.LogInformation(
             "QR y sello generados: QR {QrBytes} bytes, {QrModules} módulos, sello {StampBytes} bytes",
@@ -246,7 +252,7 @@ public sealed class PdfStampService(
                 certificate,
                 certificateBundle.Certificates,
                 stampPng,
-                placement,
+                visualPlacements,
                 request.Razon,
                 request.Ubicacion,
                 timestampService,
@@ -698,19 +704,12 @@ public sealed class PdfStampService(
             || keyUsage.KeyUsages.HasFlag(X509KeyUsageFlags.NonRepudiation);
     }
 
-    private static JsonElement CreateSignatureData(X509Certificate2 certificate)
-    {
-        var identification = GetSubjectValue(
-            certificate.SubjectName,
-            "SERIALNUMBER");
-        return JsonSerializer.SerializeToElement(new
+    private static JsonElement CreateSignatureData(X500DistinguishedName subject, string holderName) =>
+        JsonSerializer.SerializeToElement(new
         {
-            n = certificate.GetNameInfo(
-                X509NameType.SimpleName,
-                forIssuer: false),
-            i = identification
+            n = holderName,
+            i = GetSubjectValue(subject, "SERIALNUMBER")
         });
-    }
 
     private static string? GetSubjectValue(
         X500DistinguishedName subject,
@@ -763,7 +762,9 @@ public sealed class PdfStampService(
 
     private static byte[] CreateStampImage(
         byte[] qrPng,
-        JsonElement data,
+        string holderName,
+        string? recognitionName,
+        DateTimeOffset signedAt,
         double stampWidthMm)
     {
         using var qr = SKBitmap.Decode(qrPng)
@@ -779,7 +780,7 @@ public sealed class PdfStampService(
         var imageScale = stampWidth / naturalStampWidth;
         var stampHeight = (int)Math.Ceiling(stampWidth * StampHeightRatio);
         var stampHeightPoints = stampWidthMm * 72d / 25.4d * StampHeightRatio;
-        var stampFontSize = (float)(StampFontSizePoints * stampHeight / stampHeightPoints);
+        var textScale = (float)(stampHeight / stampHeightPoints);
         var leftPadding = Math.Max(
             2,
             (int)Math.Ceiling(stampWidth * StampLeftPaddingRatio));
@@ -807,65 +808,33 @@ public sealed class PdfStampService(
 
         var contentLeft = qrLeft + qrDisplayWidth + textGap;
         var contentRight = stampWidth * 0.93f;
-        var availableWidth = contentRight - contentLeft;
-        var holderName = GetText(data, "n");
-        if (!string.IsNullOrWhiteSpace(holderName))
+        var date = signedAt.ToOffset(TimeSpan.FromHours(-5)).ToString(
+            "yyyy-MM-dd HH:mm:ss zzz", CultureInfo.InvariantCulture);
+        var dateLabel = $"Fecha: {date}";
+        using var typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Normal);
+        using var font = new SKFont(typeface);
+        using var paint = new SKPaint { Color = SKColors.Black, IsAntialias = true };
+
+        void DrawTextBlock(string text, float top, float bottom, float fontSize) =>
+            DrawStampText(
+                canvas,
+                text,
+                new SKRect(contentLeft, stampHeight * top, contentRight, stampHeight * bottom),
+                font,
+                paint,
+                fontSize * textScale);
+
+        if (recognitionName is null)
         {
-            using var labelTypeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Normal);
-            const string labelText = "Firmado electrónicamente por:";
-            using var labelBaseFont = new SKFont(labelTypeface, stampFontSize);
-            var labelWidth = labelBaseFont.MeasureText(labelText);
-            var labelFontSize = labelWidth > availableWidth
-                ? stampFontSize * (availableWidth / labelWidth)
-                : stampFontSize;
-            using var labelFont = new SKFont(
-                labelTypeface,
-                labelFontSize);
-            using var labelPaint = new SKPaint
-            {
-                Color = SKColors.Black,
-                IsAntialias = true
-            };
-            canvas.DrawText(
-                labelText,
-                contentLeft,
-                stampHeight * 0.30f,
-                SKTextAlign.Left,
-                labelFont,
-                labelPaint);
-
-            using var typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Normal);
-            using var initialFont = new SKFont(
-                typeface,
-                stampFontSize);
-            var nameLines = SplitNameIntoLines(
-                holderName,
-                initialFont,
-                availableWidth);
-            var widestLine = nameLines.Max(
-                line => initialFont.MeasureText(line));
-            var nameFontSize = widestLine > availableWidth
-                ? initialFont.Size * (availableWidth / widestLine)
-                : initialFont.Size;
-            using var nameFont = new SKFont(typeface, nameFontSize);
-            using var namePaint = new SKPaint
-            {
-                Color = SKColors.Black,
-                IsAntialias = true
-            };
-
-            var firstBaseline = nameLines.Length == 1 ? 0.54f : 0.46f;
-            var lineSpacing = nameLines.Length == 1 ? 0 : 0.16f;
-            for (var index = 0; index < nameLines.Length; index++)
-            {
-                canvas.DrawText(
-                    nameLines[index],
-                    contentLeft,
-                    stampHeight * (firstBaseline + (lineSpacing * index)),
-                    SKTextAlign.Left,
-                    nameFont,
-                    namePaint);
-            }
+            DrawTextBlock("Firmado electrónicamente por:", 0.14f, 0.32f, 7);
+            DrawTextBlock(holderName, 0.32f, 0.67f, StampFontSizePoints);
+            DrawTextBlock(dateLabel, 0.67f, 0.87f, 6);
+        }
+        else
+        {
+            DrawTextBlock(holderName, 0.04f, 0.27f, StampFontSizePoints);
+            DrawTextBlock(dateLabel, 0.27f, 0.42f, 6);
+            DrawTextBlock($"Nombre de reconocimiento: {recognitionName}", 0.42f, 0.96f, 6);
         }
 
         using var image = SKImage.FromBitmap(stamp);
@@ -905,7 +874,20 @@ public sealed class PdfStampService(
                 $"Debe enviar entre 1 y {MaxPlacements} posiciones de firma.");
         }
 
-        return placements.ToArray();
+        for (var index = 0; index < placements.Count; index++)
+        {
+            var placement = placements[index];
+            if (placement is null || placement.Pagina < 1
+                || placement.XMm is < 0 or > 2000 || placement.YMm is < 0 or > 2000
+                || placement.AnchoMm is < 0 or > 160)
+            {
+                throw new StampValidationException(
+                    $"posiciones[{index}]",
+                    "Indique una página válida, coordenadas entre 0 y 2000 mm y un ancho de hasta 160 mm.");
+            }
+        }
+
+        return placements;
     }
 
     private static void ValidatePlacements(
@@ -994,74 +976,58 @@ public sealed class PdfStampService(
         graphics.Restore(state);
     }
 
-    private static string? GetText(JsonElement data, string propertyName)
+    private static void DrawStampText(
+        SKCanvas canvas,
+        string text,
+        SKRect bounds,
+        SKFont font,
+        SKPaint paint,
+        float maxFontSize)
     {
-        foreach (var property in data.EnumerateObject())
+        if (string.IsNullOrWhiteSpace(text))
+            return;
+
+        font.Size = maxFontSize;
+        var lines = WrapStampText(text, font, bounds.Width);
+        var heightRatio = bounds.Height / (font.Spacing * lines.Count);
+        if (heightRatio < 1)
         {
-            if (string.Equals(property.Name, propertyName, StringComparison.OrdinalIgnoreCase))
-            {
-                return property.Value.ValueKind == JsonValueKind.String
-                    ? property.Value.GetString()
-                    : property.Value.ToString();
-            }
+            // Reflow at a smaller size before fitting the final lines into the block.
+            font.Size *= MathF.Sqrt(heightRatio);
+            lines = WrapStampText(text, font, bounds.Width);
+            font.Size *= Math.Min(1, bounds.Height / (font.Spacing * lines.Count));
         }
 
-        return null;
+        var baseline = bounds.MidY - (font.Spacing * lines.Count / 2) - font.Metrics.Ascent;
+        foreach (var line in lines)
+        {
+            canvas.DrawText(line, bounds.Left, baseline, SKTextAlign.Left, font, paint);
+            baseline += font.Spacing;
+        }
     }
 
-    private static string[] SplitNameIntoLines(
-        string value,
-        SKFont font,
-        float maxWidth)
+    private static List<string> WrapStampText(string text, SKFont font, float width)
     {
-        var normalized = string.Join(
-            ' ',
-            value.Split(
-                ' ',
-                StringSplitOptions.RemoveEmptyEntries
-                | StringSplitOptions.TrimEntries));
-        if (font.MeasureText(normalized) <= maxWidth)
+        var lines = new List<string>();
+        var remaining = string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).AsSpan();
+        while (!remaining.IsEmpty)
         {
-            return [normalized];
-        }
+            var length = (int)font.BreakText(remaining, width);
+            if (length == 0)
+                Rune.DecodeFromUtf16(remaining, out _, out length);
 
-        var words = normalized.Split(' ');
-        if (words.Length < 2)
-        {
-            return [normalized];
-        }
-
-        if (words.Length >= 3)
-        {
-            return
-            [
-                string.Join(' ', words[..^1]),
-                words[^1]
-            ];
-        }
-
-        var bestSplit = 1;
-        var bestScore = float.MaxValue;
-        for (var index = 1; index < words.Length; index++)
-        {
-            var firstLine = string.Join(' ', words[..index]);
-            var secondLine = string.Join(' ', words[index..]);
-            var firstWidth = font.MeasureText(firstLine);
-            var secondWidth = font.MeasureText(secondLine);
-            var score = Math.Max(firstWidth, secondWidth)
-                + (Math.Abs(firstWidth - secondWidth) * 0.15f);
-            if (score < bestScore)
+            if (length < remaining.Length && remaining[length] != ' ')
             {
-                bestScore = score;
-                bestSplit = index;
+                var wordEnd = remaining[..length].LastIndexOf(' ');
+                if (wordEnd > 0)
+                    length = wordEnd;
             }
+
+            lines.Add(remaining[..length].ToString());
+            remaining = remaining[length..].TrimStart();
         }
 
-        return
-        [
-            string.Join(' ', words[..bestSplit]),
-            string.Join(' ', words[bestSplit..])
-        ];
+        return lines;
     }
 
     private sealed record GeneratedQr(byte[] Png, int ModuleCount);

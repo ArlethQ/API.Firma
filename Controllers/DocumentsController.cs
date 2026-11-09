@@ -108,6 +108,7 @@ public sealed class DocumentsController(
 
             Response.Headers.Append("X-Documento-Original-SHA256", result.OriginalSha256);
             Response.Headers.Append("X-Documento-Salida-SHA256", result.OutputSha256);
+            Response.Headers.Append("X-Tipo-Sello", request.SelloAvanzado ? "avanzada" : "simple");
             Response.Headers.Append(
                 "Content-Disposition",
                 "attachment; filename=\"documento-firmado-estampado.pdf\"");

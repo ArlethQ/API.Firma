@@ -18,6 +18,9 @@ public sealed class StampPdfRequest
     [FromForm(Name = "clave")]
     public string Clave { get; init; } = string.Empty;
 
+    [FromForm(Name = "selloAvanzado")]
+    public bool SelloAvanzado { get; init; }
+
     [StringLength(200)]
     [FromForm(Name = "razon")]
     public string? Razon { get; init; }

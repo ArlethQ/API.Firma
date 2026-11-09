@@ -19,6 +19,7 @@ internal static class IncrementalPdfSignatureAppender
     private const int MinimumReservedSignatureBytes = 16 * 1024;
     private const int TimestampedReservedSignatureBytes = 64 * 1024;
     private const double StampHeightRatio = 0.39;
+    private const int PrintReadOnlyLockedAnnotationFlags = 4 | 64 | 128;
     private static readonly Oid Sha256Oid = new("2.16.840.1.101.3.4.2.1");
     private static readonly Regex ObjectRegex = new(
         @"(?m)(?<number>\d+)\s+(?<generation>\d+)\s+obj\b",
@@ -117,9 +118,9 @@ internal static class IncrementalPdfSignatureAppender
         }
     }
 
-    internal static void ValidatePdfSharpInput(byte[] originalPdf, int pageNumber)
+    internal static void ValidatePdfSharpInput(byte[] originalPdf, IReadOnlyList<StampPlacement> placements)
     {
-        _ = LoadPdfSharpStructure(originalPdf, pageNumber);
+        _ = LoadPdfSharpStructure(originalPdf, placements);
     }
 
     public static async Task<byte[]> AppendAsync(
@@ -127,15 +128,15 @@ internal static class IncrementalPdfSignatureAppender
         X509Certificate2 signingCertificate,
         X509Certificate2Collection certificates,
         byte[] stampPng,
-        StampPlacement placement,
+        IReadOnlyList<StampPlacement> placements,
         string? reason,
         string? location,
         Rfc3161TimestampService? timestampService,
         CancellationToken cancellationToken,
         bool usePdfSharpStructure = false)
     {
-        var text = usePdfSharpStructure
-            ? LoadPdfSharpStructure(originalPdf, placement.Pagina).SyntheticText
+        var text = usePdfSharpStructure || placements.Count > 1
+            ? LoadPdfSharpStructure(originalPdf, placements).SyntheticText
             : Encoding.Latin1.GetString(originalPdf);
         var rootMatch = RootRegex.Matches(text).LastOrDefault()
             ?? throw new InvalidOperationException("El PDF no contiene un catálogo raíz válido.");
@@ -151,17 +152,12 @@ internal static class IncrementalPdfSignatureAppender
         var imageNumber = nextObjectNumber++;
         var appearanceNumber = nextObjectNumber++;
         var updates = new List<PdfObjectUpdate>();
-        var page = FindPageObject(text, placement.Pagina);
-        var pageBox = GetPageBox(page.Body);
-        var stampWidth = placement.AnchoMm * 72d / 25.4d;
-        var stampHeight = stampWidth * StampHeightRatio;
-        var stampX = placement.XMm * 72d / 25.4d;
-        var stampY = pageBox.Height - (placement.YMm * 72d / 25.4d) - stampHeight;
+        var stampWidth = placements[0].AnchoMm * 72d / 25.4d;
         var image = CreateImageObject(stampPng);
         var appearance = CreateAppearanceObject(
             imageNumber,
             stampWidth,
-            stampHeight);
+            stampWidth * StampHeightRatio);
 
         var rootObject = GetObject(text, rootNumber, rootGeneration);
         if (TryAddFieldToInlineAcroForm(
@@ -237,33 +233,33 @@ internal static class IncrementalPdfSignatureAppender
         var fieldName = "API.Firma-" + DateTime.UtcNow.ToString(
             "yyyyMMddHHmmssfff",
             CultureInfo.InvariantCulture);
-        updates.Insert(
-            0,
-            new PdfObjectUpdate(
-                fieldNumber,
-                0,
-                "<< /FT /Sig /T (" + EscapePdfString(fieldName)
-                    + ") /Type /Annot /Subtype /Widget /Rect ["
-                    + FormatNumber(stampX)
-                    + " "
-                    + FormatNumber(stampY)
-                    + " "
-                    + FormatNumber(stampX + stampWidth)
-                    + " "
-                    + FormatNumber(stampY + stampHeight)
-                    + "] /P "
-                    + page.Number
-                    + " "
-                    + page.Generation
-                    + " R /V "
-                    + signatureNumber
-                    + " 0 R /F 4 /Ff 1 /AP << /N "
-                    + appearanceNumber
-                    + " 0 R >> >>"));
-
+        var signatureField = $"/Subtype /Widget /FT /Sig /T ({EscapePdfString(fieldName)}) /V {signatureNumber} 0 R /F 4 /Ff 1";
+        var multiplePlacements = placements.Count > 1;
         updates.Add(new PdfObjectUpdate(imageNumber, 0, image));
         updates.Add(new PdfObjectUpdate(appearanceNumber, 0, appearance));
-        AppendPageAnnotation(text, page, fieldNumber, updates);
+
+        for (var index = 0; index < placements.Count; index++)
+        {
+            var placement = placements[index];
+            var page = FindPageObject(text, placement.Pagina);
+            if (multiplePlacements && index == 0)
+            {
+                // Keep the signature field separate so PDF viewers draw both visible marks as stamps.
+                updates.Add(new PdfObjectUpdate(
+                    fieldNumber,
+                    0,
+                    $"<< /Type /Annot {signatureField} /Rect [0 0 0 0] /P {page.Number} {page.Generation} R >>"));
+                AppendPageAnnotation(text, page, fieldNumber, updates);
+            }
+
+            var annotationNumber = multiplePlacements ? nextObjectNumber++ : fieldNumber;
+            var entries = multiplePlacements
+                ? $"/Subtype /Stamp /F {PrintReadOnlyLockedAnnotationFlags}"
+                : signatureField;
+            var annotation = CreateStampAnnotation(page, placement, appearanceNumber, entries);
+            updates.Add(new PdfObjectUpdate(annotationNumber, 0, annotation));
+            AppendPageAnnotation(text, page, annotationNumber, updates);
+        }
 
         var signatureSize = timestampService?.IsEnabled == true
             ? TimestampedReservedSignatureBytes
@@ -505,7 +501,7 @@ internal static class IncrementalPdfSignatureAppender
 
     private static PdfSharpStructure LoadPdfSharpStructure(
         byte[] originalPdf,
-        int pageNumber)
+        IReadOnlyList<StampPlacement> placements)
     {
         using var input = new MemoryStream(originalPdf, writable: false);
         using var document = PdfReader.Open(input, PdfDocumentOpenMode.Import);
@@ -513,15 +509,6 @@ internal static class IncrementalPdfSignatureAppender
             ?? throw new InvalidOperationException("El PDF no contiene un catálogo raíz válido.");
         var rootReference = catalog.Reference
             ?? throw new InvalidOperationException("El catálogo raíz no tiene una referencia indirecta.");
-        if (pageNumber < 1 || pageNumber > document.PageCount)
-        {
-            throw new InvalidOperationException(
-                "No se encontró la página " + pageNumber + " para el estampado incremental.");
-        }
-
-        var page = document.Pages[pageNumber - 1];
-        var pageReference = page.Reference
-            ?? throw new InvalidOperationException("La página seleccionada no tiene una referencia indirecta.");
         var records = new Dictionary<(int Number, int Generation), string>();
 
         AddPdfSharpObject(records, catalog);
@@ -542,7 +529,22 @@ internal static class IncrementalPdfSignatureAppender
             AddReferencedPdfSharpObject(records, referencedAcroForm.Elements.GetValue("/Fields"));
         }
 
-        AddReferencedPdfSharpObject(records, page.Elements.GetValue("/Annots"));
+        foreach (var placement in placements)
+        {
+            if (placement.Pagina < 1 || placement.Pagina > document.PageCount)
+            {
+                throw new StampValidationException(
+                    "posiciones",
+                    $"El PDF tiene {document.PageCount} página(s); la página {placement.Pagina} no existe.");
+            }
+
+            var page = document.Pages[placement.Pagina - 1];
+            if (page.Reference is null)
+                throw new InvalidOperationException("La página seleccionada no tiene una referencia indirecta.");
+
+            AddReferencedPdfSharpObject(records, page.Elements.GetValue("/Annots"));
+        }
+
         var allObjectNumbers = document.Internals.GetAllObjects()
             .Select(item => item.Reference)
             .Where(reference => reference is not null && reference.ObjectNumber > 0)
@@ -557,6 +559,9 @@ internal static class IncrementalPdfSignatureAppender
         var builder = new StringBuilder();
         foreach (var objectId in allObjectNumbers)
         {
+            if (records.ContainsKey(objectId))
+                continue;
+
             builder.Append(objectId.ObjectNumber.ToString(CultureInfo.InvariantCulture));
             builder.Append(' ');
             builder.Append(objectId.GenerationNumber.ToString(CultureInfo.InvariantCulture));
@@ -583,7 +588,6 @@ internal static class IncrementalPdfSignatureAppender
         builder.Append(previousXref.ToString(CultureInfo.InvariantCulture));
         builder.Append("\n%%EOF\n");
 
-        _ = pageReference;
         return new PdfSharpStructure(builder.ToString());
     }
 
@@ -713,12 +717,29 @@ internal static class IncrementalPdfSignatureAppender
             + "endstream";
     }
 
+    private static string CreateStampAnnotation(
+        PdfObject page,
+        StampPlacement placement,
+        int appearanceNumber,
+        string entries)
+    {
+        var width = placement.AnchoMm * 72d / 25.4d;
+        var height = width * StampHeightRatio;
+        var x = placement.XMm * 72d / 25.4d;
+        var y = GetPageBox(page.Body).Height - (placement.YMm * 72d / 25.4d) - height;
+        return $"<< /Type /Annot {entries} /Rect [{FormatNumber(x)} {FormatNumber(y)} "
+            + $"{FormatNumber(x + width)} {FormatNumber(y + height)}] /P {page.Number} {page.Generation} R "
+            + $"/AP << /N {appearanceNumber} 0 R >> >>";
+    }
+
     private static void AppendPageAnnotation(
         string text,
         PdfObject page,
-        int fieldNumber,
-        ICollection<PdfObjectUpdate> updates)
+        int annotationNumber,
+        List<PdfObjectUpdate> updates)
     {
+        var container = page;
+        var key = "/Annots";
         var annotsReference = AnnotsReferenceRegex.Match(page.Body);
         if (annotsReference.Success)
         {
@@ -728,18 +749,20 @@ internal static class IncrementalPdfSignatureAppender
             var annotsGeneration = int.Parse(
                 annotsReference.Groups["generation"].Value,
                 CultureInfo.InvariantCulture);
-            var annotsObject = GetObject(text, annotsNumber, annotsGeneration);
-            updates.Add(new PdfObjectUpdate(
-                annotsNumber,
-                annotsGeneration,
-                AddReferenceToArray(annotsObject.Body, fieldNumber, string.Empty)));
-            return;
+            container = GetObject(text, annotsNumber, annotsGeneration);
+            key = string.Empty;
         }
 
-        updates.Add(new PdfObjectUpdate(
-            page.Number,
-            page.Generation,
-            AddReferenceToArray(page.Body, fieldNumber, "/Annots")));
+        var updateIndex = updates.FindIndex(update => update.Number == container.Number);
+        var currentBody = updateIndex < 0 ? container.Body : updates[updateIndex].Body;
+        var updated = new PdfObjectUpdate(
+            container.Number,
+            container.Generation,
+            AddReferenceToArray(currentBody, annotationNumber, key));
+        if (updateIndex < 0)
+            updates.Add(updated);
+        else
+            updates[updateIndex] = updated;
     }
 
     private static string FormatNumber(double value) =>

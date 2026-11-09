@@ -15,6 +15,10 @@ appsettings.Local.json
 *.pem
 *.key
 
+## Public CA certificates embedded by API.Firma.csproj
+!/Certificates/Trust/uanataca-root-2016.pem
+!/Certificates/Trust/uanataca-ca2-2016.pem
+
 ## OS / editors
 .DS_Store
 Thumbs.db
