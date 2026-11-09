@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>API-Firma-Numerica-Software-2026</UserSecretsId>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+    <DefaultItemExcludes>$(DefaultItemExcludes);API.Firma.Tests/**;API.Firma.Demo/**;artifacts/**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />
+    <PackageReference Include="PDFsharp" Version="6.2.4" />
+    <PackageReference Include="QRCoder" Version="1.8.0" />
+    <PackageReference Include="SkiaSharp" Version="4.150.1" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="10.2.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Certificates\Trust\*.pem" />
+  </ItemGroup>
+
+</Project>

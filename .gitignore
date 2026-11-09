@@ -1,0 +1,22 @@
+## .NET / Visual Studio
+bin/
+obj/
+.vs/
+artifacts/
+tmp/
+TestResults/
+*.user
+*.suo
+
+## Local secrets and certificates
+appsettings.Local.json
+*.pfx
+*.p12
+*.pem
+*.key
+
+## OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

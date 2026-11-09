@@ -1,0 +1,55 @@
+@API.Firma_HostAddress = https://localhost:7165
+@ApiKey = {{$processEnv API_FIRMA_API_KEY}}
+
+POST {{API.Firma_HostAddress}}/api/documentos/estampar
+X-API-Key: {{ApiKey}}
+Content-Type: multipart/form-data; boundary=FirmaBoundary
+
+--FirmaBoundary
+Content-Disposition: form-data; name="pdf"; filename="documento.pdf"
+Content-Type: application/pdf
+
+< ./documento.pdf
+--FirmaBoundary
+Content-Disposition: form-data; name="certificado"; filename="certificado.p12"
+Content-Type: application/x-pkcs12
+
+< ./certificado.p12
+--FirmaBoundary
+Content-Disposition: form-data; name="clave"
+
+CLAVE_DEL_CERTIFICADO
+--FirmaBoundary
+Content-Disposition: form-data; name="razon"
+
+Firma digital del documento
+--FirmaBoundary
+Content-Disposition: form-data; name="pagina"
+
+1
+--FirmaBoundary
+Content-Disposition: form-data; name="xMm"
+
+10
+--FirmaBoundary
+Content-Disposition: form-data; name="yMm"
+
+10
+--FirmaBoundary
+Content-Disposition: form-data; name="anchoMm"
+
+80
+--FirmaBoundary--
+
+###
+
+POST {{API.Firma_HostAddress}}/api/documentos/validar-firma
+X-API-Key: {{ApiKey}}
+Content-Type: multipart/form-data; boundary=ValidationBoundary
+
+--ValidationBoundary
+Content-Disposition: form-data; name="pdf"; filename="documento-firmado.pdf"
+Content-Type: application/pdf
+
+< ./documento-firmado.pdf
+--ValidationBoundary--

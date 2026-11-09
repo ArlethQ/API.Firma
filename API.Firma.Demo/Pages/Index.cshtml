@@ -1,0 +1,471 @@
+@page
+@model IndexModel
+@{
+    ViewData["Title"] = "Probar firma PDF";
+}
+
+<section class="hero">
+    <div>
+        <span class="eyebrow">NUMÉRICA SOFTWARE</span>
+        <h1>Firma y estampa tu PDF</h1>
+        <p>Carga el documento y certificado para obtener el resultado en un solo paso.</p>
+    </div>
+    <div class="status-pill @(Model.ApiAvailable == false ? "is-offline" : Model.ApiAvailable is null ? "is-unknown" : string.Empty)">
+        <span></span>
+        @(Model.ApiAvailable == true
+            ? "API disponible"
+            : Model.ApiAvailable == false
+                ? "API no disponible"
+                : "API no comprobada")
+    </div>
+</section>
+
+@if (!string.IsNullOrWhiteSpace(Model.ErrorMessage))
+{
+    <div class="alert alert-danger error-panel" role="alert">
+        <strong>No se pudo procesar el documento.</strong>
+        <div>@Model.ErrorMessage</div>
+        @if (!string.IsNullOrWhiteSpace(Model.DiagnosticId))
+        {
+            <small>Identificador para logs: <code>@Model.DiagnosticId</code></small>
+        }
+    </div>
+}
+
+<form method="post" enctype="multipart/form-data" class="workspace" id="stampForm">
+    <input asp-for="PosicionSeleccionada" type="hidden" />
+    <div class="form-card">
+        <div asp-validation-summary="ModelOnly" class="text-danger"></div>
+
+        <div class="api-key-field">
+            <div>
+                <label asp-for="ApiKey">API key</label>
+                <small>Se sincroniza automáticamente con API.Firma; también puedes escribir otra.</small>
+            </div>
+            <input asp-for="ApiKey" type="password" value="@Model.ApiKey" class="form-control" autocomplete="off" />
+            <span asp-validation-for="ApiKey" class="text-danger"></span>
+        </div>
+
+        <div class="section-heading">
+            <span>1</span>
+            <div>
+                <h2>Archivos</h2>
+                <p>Selecciona el PDF y el certificado de firma.</p>
+            </div>
+        </div>
+
+        <div class="file-grid">
+            <label class="file-field">
+                <span class="file-icon">PDF</span>
+                <strong>Documento</strong>
+                <small>Máximo 10 MB</small>
+                <input asp-for="Pdf" type="file" accept="application/pdf" />
+                <span asp-validation-for="Pdf" class="text-danger"></span>
+            </label>
+
+            <label class="file-field">
+                <span class="file-icon">P12</span>
+                <strong>Certificado</strong>
+                <small>P12 o PFX, máximo 1 MB</small>
+                <input
+                    asp-for="CertificadoFirma"
+                    type="file"
+                    accept=".p12,.pfx,application/x-pkcs12" />
+                <span asp-validation-for="CertificadoFirma" class="text-danger"></span>
+            </label>
+
+            <label class="file-field">
+                <span class="file-icon">KEY</span>
+                <strong>Clave del certificado</strong>
+                <small>Se usa únicamente en memoria</small>
+                <input
+                    asp-for="ClaveCertificado"
+                    type="password"
+                    value=""
+                    autocomplete="current-password" />
+                <span asp-validation-for="ClaveCertificado" class="text-danger"></span>
+            </label>
+        </div>
+
+        <div class="section-heading section-gap">
+            <span>2</span>
+            <div>
+                <h2>Detalles de la firma</h2>
+                <p>Los datos del firmante y del QR se obtienen automáticamente del certificado.</p>
+            </div>
+        </div>
+
+        <div class="signing-form-fields">
+            <div>
+                <label asp-for="RazonFirma">Razón de la firma</label>
+                <input asp-for="RazonFirma" class="form-control" maxlength="200" />
+            </div>
+            <div>
+                <label asp-for="UbicacionFirma">Ubicación (opcional)</label>
+                <input asp-for="UbicacionFirma" class="form-control" maxlength="200" />
+            </div>
+        </div>
+
+        <div class="section-heading section-gap">
+            <span>3</span>
+            <div>
+                <h2>Ubicación del sello</h2>
+                <p>Haz clic para ubicar el sello o arrastra hacia abajo y a la derecha para dibujar su tamaño.</p>
+            </div>
+        </div>
+
+        <div class="pdf-selector" id="pdfSelector">
+            <div class="pdf-toolbar">
+                <button type="button" id="previousPage" aria-label="Página anterior">‹</button>
+                <span>Página <strong id="currentPage">1</strong> de <strong id="pageCount">0</strong></span>
+                <button type="button" id="nextPage" aria-label="Página siguiente">›</button>
+                <span class="selection-status" id="selectionStatus">Carga un PDF para seleccionar la posición.</span>
+            </div>
+            <div class="pdf-stage" id="pdfStage">
+                <canvas id="pdfCanvas" hidden></canvas>
+                <div class="stamp-footprint" id="stampFootprint" hidden>
+                    <span class="position-dot"></span>
+                    <button
+                        type="button"
+                        class="resize-handle"
+                        id="resizeHandle"
+                        aria-label="Cambiar tamaño del sello"
+                        title="Arrastra para cambiar el tamaño"></button>
+                </div>
+                <div class="pdf-placeholder" id="pdfPlaceholder">
+                    <strong>Vista previa del documento</strong>
+                    <span>Después de cargar el PDF, haz clic sobre la página.</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="position-grid">
+            <div>
+                <label asp-for="Pagina">Página</label>
+                <input asp-for="Pagina" class="form-control" min="1" />
+                <span asp-validation-for="Pagina" class="text-danger"></span>
+            </div>
+            <div>
+                <label asp-for="XMm">X (mm)</label>
+                <input asp-for="XMm" class="form-control" readonly />
+                <span asp-validation-for="XMm" class="text-danger"></span>
+            </div>
+            <div>
+                <label asp-for="YMm">Y (mm)</label>
+                <input asp-for="YMm" class="form-control" readonly />
+                <span asp-validation-for="YMm" class="text-danger"></span>
+            </div>
+            <div>
+                <label asp-for="AnchoMm">Ancho (mm)</label>
+                <input asp-for="AnchoMm" class="form-control" />
+                <span asp-validation-for="AnchoMm" class="text-danger"></span>
+            </div>
+        </div>
+        <small class="position-note">El punto azul marca la posición. Al arrastrar, el recuadro conserva automáticamente la proporción real del sello.</small>
+
+        <div asp-validation-summary="All" class="alert alert-danger form-errors" role="alert"></div>
+        <div class="submit-status" id="submitStatus" role="status" aria-live="polite"></div>
+        <button type="submit" class="submit-button" id="submitButton">
+            <span class="submit-label">Firmar, estampar y descargar PDF</span>
+            <span class="submit-loading" hidden>Procesando documento…</span>
+        </button>
+    </div>
+
+    <aside class="help-card">
+        <div class="qr-preview">
+            <div class="qr-pattern"></div>
+            <span>N</span>
+        </div>
+        <h3>¿Qué obtendrás?</h3>
+        <p>Un PDF firmado digitalmente y estampado con los datos del certificado.</p>
+        <ul>
+            <li>Huella SHA-256 del documento</li>
+            <li>Datos del certificado dentro del QR</li>
+            <li>Firma digital SHA-256</li>
+            <li>Posición seleccionada directamente en el PDF</li>
+        </ul>
+        <div class="notice">
+            La API debe estar ejecutándose en <code>localhost:5029</code>.
+        </div>
+        @if (Model.QrUsesLocalhost)
+        {
+            <div class="notice warning-notice">
+                El QR usa <code>localhost</code>. Un teléfono podrá leerlo, pero no abrir
+                la validación. Configure <code>QrSecurity:VerificationBaseUrl</code> con
+                la IP de red o el dominio público del API.
+            </div>
+        }
+    </aside>
+</form>
+
+<section class="verification-card" aria-labelledby="signature-validation-title">
+    <div class="section-heading">
+        <span>PDF</span>
+        <div>
+            <h2 id="signature-validation-title">Validar firma digital del PDF</h2>
+            <p>Comprueba integridad, certificado, revocación OCSP/CRL y sello de tiempo RFC 3161.</p>
+        </div>
+    </div>
+
+    <form
+        method="post"
+        asp-page-handler="ValidarFirma"
+        enctype="multipart/form-data"
+        class="signature-validation-form">
+        <div class="signature-form-fields">
+            <div>
+                <label asp-for="PdfValidacion">Documento PDF firmado</label>
+                <input
+                    asp-for="PdfValidacion"
+                    type="file"
+                    class="form-control"
+                    accept="application/pdf" />
+                <small>Máximo 10 MB. El archivo no se almacena en el demo.</small>
+            </div>
+        </div>
+        <button type="submit" class="submit-button">Analizar firma digital</button>
+    </form>
+
+    @if (!string.IsNullOrWhiteSpace(Model.SignatureErrorMessage))
+    {
+        <div class="verification-result is-invalid" role="alert">
+            <strong>No se pudo validar el documento</strong>
+            <span>@Model.SignatureErrorMessage</span>
+            @if (!string.IsNullOrWhiteSpace(Model.DiagnosticId))
+            {
+                <small>Identificador para logs: <code>@Model.DiagnosticId</code></small>
+            }
+        </div>
+    }
+
+    @if (Model.SignatureValidation is not null)
+    {
+        var validationStateClass = Model.SignatureValidation.Estado == "VALIDA"
+            ? "is-valid"
+            : Model.SignatureValidation.Estado == "NO_VERIFICABLE"
+                ? "is-warning"
+                : "is-invalid";
+        <div class="signature-summary @validationStateClass"
+             role="@(Model.SignatureValidation.Estado == "INVALIDA" ? "alert" : "status")">
+            <div class="signature-summary-icon">
+                @(Model.SignatureValidation.Estado == "VALIDA"
+                    ? "✓"
+                    : Model.SignatureValidation.Estado == "NO_VERIFICABLE"
+                        ? "?"
+                        : "!")
+            </div>
+            <div>
+                <strong>
+                    @(Model.SignatureValidation.Estado switch
+                    {
+                        "VALIDA" => "Documento firmado correctamente",
+                        "SIN_FIRMAS" => "El PDF no contiene firmas digitales",
+                        "NO_VERIFICABLE" => "La firma existe, pero la validación quedó inconclusa",
+                        _ => "La firma digital no es válida"
+                    })
+                </strong>
+                <span>@Model.SignatureValidation.Resumen</span>
+                <span>@Model.SignatureValidation.CantidadFirmas firma(s) encontrada(s).</span>
+            </div>
+        </div>
+
+        @if (Model.SignatureValidation.Errores.Count > 0)
+        {
+            <div class="validation-issues">
+                <strong>Motivos encontrados</strong>
+                <ul>
+                    @foreach (var issue in Model.SignatureValidation.Errores)
+                    {
+                        <li>
+                            <code>@issue.Codigo</code>
+                            @if (issue.NumeroFirma is not null)
+                            {
+                                <span>Firma @issue.NumeroFirma:</span>
+                            }
+                            @issue.Mensaje
+                        </li>
+                    }
+                </ul>
+            </div>
+        }
+
+        @for (var index = 0; index < Model.SignatureValidation.Firmas.Count; index++)
+        {
+            var firma = Model.SignatureValidation.Firmas[index];
+            var firmaInconclusa = firma.CodigoError is
+                "REVOCACION_NO_COMPROBADA" or "CADENA_NO_CONFIABLE";
+            <article class="signature-item">
+                <header>
+                    <div>
+                        <span class="signature-number">Firma @(index + 1)</span>
+                        <h3>@(string.IsNullOrWhiteSpace(firma.Firmante) ? "Firmante no identificado" : firma.Firmante)</h3>
+                        @if (!string.IsNullOrWhiteSpace(firma.Emisor))
+                        {
+                            <p>Emitido por @firma.Emisor</p>
+                        }
+                    </div>
+                    <span class="signature-state @(firma.Valida ? "is-valid" : firmaInconclusa ? "is-warning" : "is-invalid")">
+                        @(firma.Valida ? "Válida" : firmaInconclusa ? "No verificable" : "No válida")
+                    </span>
+                </header>
+
+                <div class="validation-badges">
+                    <span class="validation-badge @(firma.IntegridadValida ? "is-valid" : "is-invalid")">
+                        Integridad @(firma.IntegridadValida ? "correcta" : "incorrecta")
+                    </span>
+                    <span class="validation-badge @(firma.CertificadoVigente ? "is-valid" : "is-invalid")">
+                        Certificado @(firma.CertificadoVigente ? "vigente" : "expirado")
+                    </span>
+                    <span class="validation-badge @(firma.CadenaConfiable ? "is-valid" : "is-invalid")">
+                        Cadena @(firma.CadenaConfiable ? "confiable" : "no confiable")
+                    </span>
+                    <span class="validation-badge @(firma.EstadoRevocacion == "Revocado" ? "is-invalid" : firma.EstadoRevocacion == "NoDisponible" ? "is-neutral" : "is-valid")">
+                        Revocación: @firma.EstadoRevocacion
+                    </span>
+                    <span class="validation-badge @(firma.SelloTiempoValido == true ? "is-valid" : firma.SelloTiempoValido == false ? "is-invalid" : "is-neutral")">
+                        Sello de tiempo:
+                        @(firma.SelloTiempoValido == true
+                            ? "válido"
+                            : firma.SelloTiempoValido == false
+                                ? "inválido"
+                                : "no incluido")
+                    </span>
+                </div>
+
+                @if (!string.IsNullOrWhiteSpace(firma.MensajeValidacion))
+                {
+                    <div class="signature-error @(firmaInconclusa ? "is-warning" : string.Empty)">
+                        @if (!string.IsNullOrWhiteSpace(firma.CodigoError))
+                        {
+                            <code>@firma.CodigoError</code>
+                        }
+                        @firma.MensajeValidacion
+                    </div>
+                }
+
+                <details>
+                    <summary>Ver certificado y datos técnicos</summary>
+                    <dl class="signature-details">
+                        <div>
+                            <dt>Cobertura</dt>
+                            <dd>@(firma.CubreDocumentoCompleto ? "Documento completo" : "Revisión anterior del documento")</dd>
+                        </div>
+                        <div>
+                            <dt>Fecha declarada</dt>
+                            <dd>@(firma.FechaFirma?.ToString("u") ?? "No informada")</dd>
+                        </div>
+                        <div>
+                            <dt>Vigencia certificado</dt>
+                            <dd>
+                                @(firma.CertificadoDesde?.ToString("u") ?? "—")
+                                hasta @(firma.CertificadoHasta?.ToString("u") ?? "—")
+                            </dd>
+                        </div>
+                        <div>
+                            <dt>Dias de vigencia</dt>
+                            <dd>
+                                @(firma.DiasVigenciaCertificado?.ToString() ?? "No disponible")
+                                total; @(firma.DiasRestantesVigencia?.ToString() ?? "No disponible") restantes
+                            </dd>
+                        </div>
+                        <div>
+                            <dt>Algoritmo hash</dt>
+                            <dd>@(firma.AlgoritmoHash ?? "No disponible")</dd>
+                        </div>
+                        <div>
+                            <dt>Número de serie</dt>
+                            <dd><code>@(firma.NumeroSerie ?? "No disponible")</code></dd>
+                        </div>
+                        <div>
+                            <dt>Huella digital</dt>
+                            <dd><code>@(firma.HuellaDigital ?? "No disponible")</code></dd>
+                        </div>
+                        <div>
+                            <dt>Fecha sello de tiempo</dt>
+                            <dd>@(firma.FechaSelloTiempo?.ToString("u") ?? "No incluido")</dd>
+                        </div>
+                        <div>
+                            <dt>Autoridad de tiempo</dt>
+                            <dd>@(firma.AutoridadSelloTiempo ?? "No incluida")</dd>
+                        </div>
+                        @if (!string.IsNullOrWhiteSpace(firma.DetalleTecnico)
+                            && !string.Equals(
+                                firma.DetalleTecnico,
+                                firma.Error,
+                                StringComparison.Ordinal))
+                        {
+                            <div>
+                                <dt>Detalle técnico</dt>
+                                <dd><code>@firma.DetalleTecnico</code></dd>
+                            </div>
+                        }
+                    </dl>
+                </details>
+            </article>
+        }
+    }
+</section>
+
+<section class="verification-card" aria-labelledby="qr-validation-title">
+    <div class="section-heading">
+        <span>✓</span>
+        <div>
+            <h2 id="qr-validation-title">Validar QR</h2>
+            <p>Pega el token o la URL leída del QR para comprobar su autenticidad.</p>
+        </div>
+    </div>
+
+    <form method="post" asp-page-handler="ValidarQr" class="verification-form">
+        <label asp-for="QrEntrada">Token o URL de verificación</label>
+        <div class="verification-input">
+            <textarea
+                asp-for="QrEntrada"
+                class="form-control"
+                rows="3"
+                maxlength="12000"
+                spellcheck="false"
+                placeholder="v1... o http://localhost:5029/api/verificaciones/qr?token=v1..."></textarea>
+            <button type="submit" class="submit-button">Validar autenticidad</button>
+        </div>
+    </form>
+
+    @if (!string.IsNullOrWhiteSpace(Model.QrErrorMessage))
+    {
+        <div class="verification-result is-invalid" role="alert">
+            <strong>QR no válido</strong>
+            <span>@Model.QrErrorMessage</span>
+        </div>
+    }
+
+    @if (Model.QrVerification is not null)
+    {
+        <div class="verification-result is-valid" role="status">
+            <div>
+                <strong>QR auténtico</strong>
+                <span>La firma criptográfica y la estructura del contenido son válidas.</span>
+            </div>
+            <dl>
+                <div>
+                    <dt>Firmado (UTC)</dt>
+                    <dd>@Model.QrVerification.FirmadoEnUtc.ToString("u")</dd>
+                </div>
+                <div>
+                    <dt>SHA-256 documento original</dt>
+                    <dd><code>@Model.QrVerification.DocumentoOriginalSha256</code></dd>
+                </div>
+            </dl>
+            <details>
+                <summary>Ver datos incluidos en el QR</summary>
+                <pre>@Model.QrDatosJson</pre>
+            </details>
+            <small>
+                Esta validación confirma que los datos del QR no fueron alterados. Para relacionarlos
+                con un archivo concreto debe compararse la huella del PDF original.
+            </small>
+        </div>
+    }
+</section>
+
+@section Scripts {
+    <partial name="_ValidationScriptsPartial" />
+}
