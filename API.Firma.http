@@ -1,5 +1,5 @@
 @API.Firma_HostAddress = https://localhost:7165
-@ApiKey = {{$processEnv API_FIRMA_API_KEY}}
+@ApiKey = development-only-api-key-change-me-2026
 
 POST {{API.Firma_HostAddress}}/api/documentos/estampar
 X-API-Key: {{ApiKey}}
