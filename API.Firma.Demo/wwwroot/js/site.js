@@ -151,6 +151,9 @@
     const context = canvas.getContext("2d", { alpha: false });
     renderTask = pdfPage.render({
       canvasContext: context,
+      // Paint existing signature appearances into the canvas as well.
+      intent: "print",
+      annotationMode: 1, // PDF.js AnnotationMode.ENABLE
       viewport,
       transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0]
     });

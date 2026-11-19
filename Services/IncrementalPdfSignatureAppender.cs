@@ -135,7 +135,11 @@ internal static class IncrementalPdfSignatureAppender
         CancellationToken cancellationToken,
         bool usePdfSharpStructure = false)
     {
+        // A signed PDF can redefine an object inside an object stream. A textual
+        // search may still find its older revision, losing later fields/annotations.
+        // Resolve the current xref revision before updating a signed document.
         var text = usePdfSharpStructure || placements.Count > 1
+            || originalPdf.AsSpan().IndexOf("/ByteRange"u8) >= 0
             ? LoadPdfSharpStructure(originalPdf, placements).SyntheticText
             : Encoding.Latin1.GetString(originalPdf);
         var rootMatch = RootRegex.Matches(text).LastOrDefault()
@@ -602,6 +606,12 @@ internal static class IncrementalPdfSignatureAppender
         if (item is PdfReference reference && reference.Value is PdfSharp.Pdf.PdfObject pdfObject)
         {
             AddPdfSharpObject(records, pdfObject);
+        }
+        else if (item is PdfSharp.Pdf.PdfObject resolvedObject)
+        {
+            // PDFsharp may already have dereferenced /Fields or /Annots.
+            // Keep its real array instead of the synthetic placeholder.
+            AddPdfSharpObject(records, resolvedObject);
         }
     }
 

@@ -1,0 +1,30 @@
+diff --git a/Simetric/wwwroot/js/esignPdfPreview.js b/Simetric/wwwroot/js/esignPdfPreview.js
+--- a/Simetric/wwwroot/js/esignPdfPreview.js
++++ b/Simetric/wwwroot/js/esignPdfPreview.js
+@@ -111,2 +111,5 @@
+                     canvasContext: context,
++                    // Include signature appearances that PDF.js separates in display mode.
++                    intent: "print",
++                    annotationMode: pdfjs.AnnotationMode.ENABLE,
+                     viewport: scaledViewport,
+@@ -153,2 +156,5 @@
+             canvasContext: context,
++            // Include signature appearances that PDF.js separates in display mode.
++            intent: "print",
++            annotationMode: pdfjs.AnnotationMode.ENABLE,
+             viewport,
+diff --git a/Simetric/wwwroot/js/esignStampSelector.js b/Simetric/wwwroot/js/esignStampSelector.js
+--- a/Simetric/wwwroot/js/esignStampSelector.js
++++ b/Simetric/wwwroot/js/esignStampSelector.js
+@@ -158,2 +158,5 @@
+                     canvasContext: context,
++                    // Include signature appearances that PDF.js separates in display mode.
++                    intent: "print",
++                    annotationMode: pdfjs.AnnotationMode.ENABLE,
+                     viewport: scaledViewport,
+@@ -268,2 +271,5 @@
+             canvasContext: context,
++            // Include signature appearances that PDF.js separates in display mode.
++            intent: "print",
++            annotationMode: pdfjs.AnnotationMode.ENABLE,
+             viewport,

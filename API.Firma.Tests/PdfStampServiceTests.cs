@@ -22,14 +22,26 @@ public sealed class PdfStampServiceTests
     private const string CertificatePassword = "Clave-segura-de-prueba";
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    [InlineData(true, true)]
-    public async Task StampAsync_PreservesPreviousSignaturesAndFields(bool useIndirectForm, bool useIndirectFields)
+    [InlineData(false, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, true)]
+    public async Task StampAsync_PreservesPreviousSignaturesAndFields(bool useIndirectForm, bool useIndirectFields, bool multiplePlacements = false)
     {
         using var source = new PdfDocument();
-        source.AddPage();
+        var page = source.AddPage();
+        // External signers may store page annotations in an indirect array.
+        // Exercise that independently from direct/indirect AcroForm fields.
+        if (useIndirectFields)
+        {
+            var annotations = new PdfArray(source);
+            source.Internals.AddObject(annotations);
+            page.Elements["/Annots"] = annotations.Reference!;
+        }
         var form = new PdfDictionary(source);
         var fields = new PdfArray(source);
         if (useIndirectFields)
@@ -53,13 +65,23 @@ public sealed class PdfStampServiceTests
         var previous = input.ToArray();
         for (var count = 1; count <= 3; count++)
         {
-            var result = await CreateService().StampAsync(CreateRequest(previous), CancellationToken.None);
+            var result = await CreateService().StampAsync(CreateRequest(previous,
+                positions: multiplePlacements
+                    ? "[{\"pagina\":1,\"xMm\":10,\"yMm\":10,\"anchoMm\":100},{\"pagina\":1,\"xMm\":10,\"yMm\":80,\"anchoMm\":100}]"
+                    : null), CancellationToken.None);
             Assert.True(result.Pdf.AsSpan(0, previous.Length).SequenceEqual(previous));
             using var output = new MemoryStream(result.Pdf);
             using var document = PdfReader.Open(output, PdfDocumentOpenMode.Import);
             var signedForm = document.Internals.Catalog.Elements.GetDictionary("/AcroForm")!;
             Assert.Equal(count, signedForm.Elements.GetArray("/Fields")!.Elements.Count);
-            Assert.Equal(count, document.Pages[0].Elements.GetArray("/Annots")!.Elements.Count);
+            var annotations = document.Pages[0].Elements.GetArray("/Annots")!;
+            Assert.Equal(count * (multiplePlacements ? 3 : 1), annotations.Elements.Count);
+            var visibleAnnotations = annotations.Elements.OfType<PdfSharp.Pdf.Advanced.PdfReference>()
+                .Select(reference => Assert.IsAssignableFrom<PdfDictionary>(reference.Value))
+                .Where(annotation => annotation.Elements.ContainsKey("/AP"));
+            Assert.Equal(count * (multiplePlacements ? 2 : 1), visibleAnnotations.Count());
+            Assert.All(visibleAnnotations, annotation =>
+                Assert.NotNull(annotation.Elements.GetDictionary("/AP")!.Elements.GetDictionary("/N")));
             var validator = new PdfSignatureValidationService(
                 NullLogger<PdfSignatureValidationService>.Instance,
                 new UanatacaTrustStore(NullLogger<UanatacaTrustStore>.Instance));
@@ -343,7 +365,8 @@ public sealed class PdfStampServiceTests
         byte[] pdf,
         string password = CertificatePassword,
         byte[]? certificate = null,
-        string fileName = "certificado.p12")
+        string fileName = "certificado.p12",
+        string? positions = null)
     {
         var stream = new MemoryStream(pdf);
         var file = new FormFile(stream, 0, stream.Length, "pdf", "documento.pdf")
@@ -361,6 +384,7 @@ public sealed class PdfStampServiceTests
                 fileName,
                 "application/x-pkcs12"),
             Clave = password,
+            Posiciones = positions,
             Razon = "Prueba integrada",
             Pagina = 1,
             XMm = 10,
