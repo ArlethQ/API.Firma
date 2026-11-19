@@ -7,7 +7,7 @@
     <UserSecretsId>API-Firma-Numerica-Software-2026</UserSecretsId>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);1591</NoWarn>
-    <DefaultItemExcludes>$(DefaultItemExcludes);API.Firma.Tests/**;API.Firma.Demo/**;artifacts/**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);API.Firma/**;API.Firma.Tests/**;API.Firma.Demo/**;artifacts/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>

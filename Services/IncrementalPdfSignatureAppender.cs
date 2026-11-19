@@ -63,7 +63,7 @@ internal static class IncrementalPdfSignatureAppender
         var page = FindPageObject(text, pageNumber);
         _ = GetPageBox(page.Body);
 
-        if (!TryAddFieldToInlineAcroForm(rootObject.Body, 0, out _))
+        if (!TryAddFieldToInlineAcroForm(text, rootObject.Body, 0, out _))
         {
             var acroFormMatch = AcroFormRegex.Match(rootObject.Body);
             if (acroFormMatch.Success)
@@ -161,6 +161,7 @@ internal static class IncrementalPdfSignatureAppender
 
         var rootObject = GetObject(text, rootNumber, rootGeneration);
         if (TryAddFieldToInlineAcroForm(
+                text,
                 rootObject.Body,
                 fieldNumber,
                 out var updatedRootBody))
@@ -393,7 +394,10 @@ internal static class IncrementalPdfSignatureAppender
             builder.Append(group.Key.ToString(CultureInfo.InvariantCulture));
             builder.Append(" 1\n");
             builder.Append(group.Value.ToString("D10", CultureInfo.InvariantCulture));
-            builder.Append(" 00000 n \n");
+            var generation = updates.Single(update => update.Number == group.Key).Generation;
+            builder.Append(' ');
+            builder.Append(generation.ToString("D5", CultureInfo.InvariantCulture));
+            builder.Append(" n \n");
         }
 
         builder.Append("trailer\n<<\n/Size ");
@@ -832,6 +836,7 @@ internal static class IncrementalPdfSignatureAppender
     }
 
     private static bool TryAddFieldToInlineAcroForm(
+        string text,
         string rootBody,
         int fieldNumber,
         out string updatedRootBody)
@@ -843,18 +848,60 @@ internal static class IncrementalPdfSignatureAppender
             return false;
         }
 
-        var dictionaryStart = rootBody.IndexOf("<<", acroFormIndex, StringComparison.Ordinal);
-        if (dictionaryStart < 0)
+        var valueStart = acroFormIndex + "/AcroForm".Length;
+        while (valueStart < rootBody.Length && char.IsWhiteSpace(rootBody[valueStart]))
+            valueStart++;
+        // An indirect AcroForm must be updated through its referenced object.
+        // Searching for the next dictionary can accidentally select /Extensions or /Perms.
+        var dictionaryStart = valueStart;
+        if (!rootBody.AsSpan(valueStart).StartsWith("<<", StringComparison.Ordinal))
         {
             updatedRootBody = rootBody;
             return false;
         }
 
-        var fieldsMatch = InlineFieldsRegex.Match(rootBody, dictionaryStart);
+        var depth = 0;
+        var dictionaryEnd = -1;
+        for (var index = dictionaryStart; index < rootBody.Length - 1; index++)
+        {
+            if (rootBody[index] == '<' && rootBody[index + 1] == '<')
+            {
+                depth++;
+                index++;
+            }
+            else if (rootBody[index] == '>' && rootBody[index + 1] == '>')
+            {
+                depth--;
+                index++;
+                if (depth == 0)
+                {
+                    dictionaryEnd = index + 1;
+                    break;
+                }
+            }
+        }
+        if (dictionaryEnd < 0)
+            throw new InvalidOperationException("El diccionario AcroForm no está correctamente formado.");
+
+        var acroFormBody = rootBody[dictionaryStart..dictionaryEnd];
+        var fieldsReference = FieldsReferenceRegex.Match(acroFormBody);
+        if (fieldsReference.Success)
+        {
+            var fieldsObject = GetObject(text,
+                int.Parse(fieldsReference.Groups["number"].Value, CultureInfo.InvariantCulture),
+                int.Parse(fieldsReference.Groups["generation"].Value, CultureInfo.InvariantCulture));
+            // Keep every existing field reference when the array is indirect.
+            var fieldsArray = AddReferenceToArray(fieldsObject.Body, fieldNumber, string.Empty);
+            var updatedForm = acroFormBody.Remove(fieldsReference.Index, fieldsReference.Length)
+                .Insert(fieldsReference.Index, "/Fields " + fieldsArray);
+            updatedRootBody = rootBody.Remove(dictionaryStart, dictionaryEnd - dictionaryStart)
+                .Insert(dictionaryStart, SetDictionaryEntry(updatedForm, "/SigFlags", "3"));
+            return true;
+        }
+        var fieldsMatch = InlineFieldsRegex.Match(acroFormBody);
         if (!fieldsMatch.Success)
         {
-            updatedRootBody = rootBody;
-            return false;
+            throw new InvalidOperationException("El AcroForm directo no contiene un arreglo Fields compatible.");
         }
 
         var items = fieldsMatch.Groups["items"].Value.Trim();
@@ -863,18 +910,10 @@ internal static class IncrementalPdfSignatureAppender
             + " "
             + fieldNumber
             + " 0 R]";
-        updatedRootBody = rootBody.Remove(fieldsMatch.Index, fieldsMatch.Length)
+        var updatedAcroForm = acroFormBody.Remove(fieldsMatch.Index, fieldsMatch.Length)
             .Insert(fieldsMatch.Index, replacement);
-
-        var duplicateAcroForm = AcroFormRegex.Match(
-            updatedRootBody,
-            fieldsMatch.Index + replacement.Length);
-        if (duplicateAcroForm.Success)
-        {
-            updatedRootBody = updatedRootBody.Remove(
-                duplicateAcroForm.Index,
-                duplicateAcroForm.Length);
-        }
+        updatedRootBody = rootBody.Remove(dictionaryStart, dictionaryEnd - dictionaryStart)
+            .Insert(dictionaryStart, SetDictionaryEntry(updatedAcroForm, "/SigFlags", "3"));
 
         return true;
     }

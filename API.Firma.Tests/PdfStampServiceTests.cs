@@ -21,6 +21,56 @@ public sealed class PdfStampServiceTests
 {
     private const string CertificatePassword = "Clave-segura-de-prueba";
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task StampAsync_PreservesPreviousSignaturesAndFields(bool useIndirectForm, bool useIndirectFields)
+    {
+        using var source = new PdfDocument();
+        source.AddPage();
+        var form = new PdfDictionary(source);
+        var fields = new PdfArray(source);
+        if (useIndirectFields)
+            source.Internals.AddObject(fields);
+        form.Elements["/Fields"] = useIndirectFields ? fields.Reference! : fields;
+        if (useIndirectForm)
+        {
+            source.Internals.AddObject(form);
+            source.Internals.Catalog.Elements["/AcroForm"] = form.Reference!;
+            // A later dictionary must never be mistaken for the indirect AcroForm.
+            var other = new PdfDictionary(source);
+            other.Elements["/Fields"] = new PdfArray(source);
+            source.Internals.Catalog.Elements["/Other"] = other;
+        }
+        else
+        {
+            source.Internals.Catalog.Elements["/AcroForm"] = form;
+        }
+        using var input = new MemoryStream();
+        source.Save(input, false);
+        var previous = input.ToArray();
+        for (var count = 1; count <= 3; count++)
+        {
+            var result = await CreateService().StampAsync(CreateRequest(previous), CancellationToken.None);
+            Assert.True(result.Pdf.AsSpan(0, previous.Length).SequenceEqual(previous));
+            using var output = new MemoryStream(result.Pdf);
+            using var document = PdfReader.Open(output, PdfDocumentOpenMode.Import);
+            var signedForm = document.Internals.Catalog.Elements.GetDictionary("/AcroForm")!;
+            Assert.Equal(count, signedForm.Elements.GetArray("/Fields")!.Elements.Count);
+            Assert.Equal(count, document.Pages[0].Elements.GetArray("/Annots")!.Elements.Count);
+            var validator = new PdfSignatureValidationService(
+                NullLogger<PdfSignatureValidationService>.Instance,
+                new UanatacaTrustStore(NullLogger<UanatacaTrustStore>.Instance));
+            var validation = await validator.ValidateAsync(
+                CreateFormFile(result.Pdf, "pdf", "firmado.pdf", "application/pdf"), CancellationToken.None);
+            Assert.Equal(count, validation.Firmas.Count);
+            Assert.All(validation.Firmas, signature => Assert.True(signature.IntegridadValida));
+            previous = result.Pdf;
+        }
+    }
+
     [Fact]
     public async Task StampAsync_StampsAndSignsInOneFlow()
     {
