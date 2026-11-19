@@ -210,12 +210,18 @@ public sealed class PdfStampService(
         }
 
         var holderName = certificate.GetNameInfo(X509NameType.SimpleName, forIssuer: false);
-        var signatureData = CreateSignatureData(certificate.SubjectName, holderName);
-
         var signedAt = DateTimeOffset.Now;
-        var qrPayload = qrTokenService.CreatePlainText(
-            signatureData,
-            signedAt.ToUniversalTime());
+        var date = signedAt.ToOffset(TimeSpan.FromHours(-5)).ToString(
+            "yyyy-MM-dd HH:mm:ss zzz", CultureInfo.InvariantCulture);
+        var dateLabel = $"Fecha: {date}";
+        var recognitionLabel = request.SelloAvanzado
+            ? $"Nombre de reconocimiento: {certificate.Subject}"
+            : null;
+        var qrPayload = recognitionLabel is null
+            ? qrTokenService.CreatePlainText(
+                CreateSignatureData(certificate.SubjectName, holderName),
+                signedAt.ToUniversalTime())
+            : string.Join('\n', holderName, dateLabel, recognitionLabel);
         ValidateQrPayloadSize(qrPayload);
         var qr = CreateQr(qrPayload);
         var visualPlacements = placements.Select(placement => placement with
@@ -232,8 +238,8 @@ public sealed class PdfStampService(
         var stampPng = CreateStampImage(
             qr.Png,
             holderName,
-            request.SelloAvanzado ? certificate.Subject : null,
-            signedAt,
+            dateLabel,
+            recognitionLabel,
             stampWidthMm);
         logger.LogInformation(
             "QR y sello generados: QR {QrBytes} bytes, {QrModules} módulos, sello {StampBytes} bytes",
@@ -763,8 +769,8 @@ public sealed class PdfStampService(
     private static byte[] CreateStampImage(
         byte[] qrPng,
         string holderName,
-        string? recognitionName,
-        DateTimeOffset signedAt,
+        string dateLabel,
+        string? recognitionLabel,
         double stampWidthMm)
     {
         using var qr = SKBitmap.Decode(qrPng)
@@ -808,9 +814,6 @@ public sealed class PdfStampService(
 
         var contentLeft = qrLeft + qrDisplayWidth + textGap;
         var contentRight = stampWidth * 0.93f;
-        var date = signedAt.ToOffset(TimeSpan.FromHours(-5)).ToString(
-            "yyyy-MM-dd HH:mm:ss zzz", CultureInfo.InvariantCulture);
-        var dateLabel = $"Fecha: {date}";
         using var typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Normal);
         using var font = new SKFont(typeface);
         using var paint = new SKPaint { Color = SKColors.Black, IsAntialias = true };
@@ -824,7 +827,7 @@ public sealed class PdfStampService(
                 paint,
                 fontSize * textScale);
 
-        if (recognitionName is null)
+        if (recognitionLabel is null)
         {
             DrawTextBlock("Firmado electrónicamente por:", 0.14f, 0.32f, 7);
             DrawTextBlock(holderName, 0.32f, 0.67f, StampFontSizePoints);
@@ -834,7 +837,7 @@ public sealed class PdfStampService(
         {
             DrawTextBlock(holderName, 0.04f, 0.27f, StampFontSizePoints);
             DrawTextBlock(dateLabel, 0.27f, 0.42f, 6);
-            DrawTextBlock($"Nombre de reconocimiento: {recognitionName}", 0.42f, 0.96f, 6);
+            DrawTextBlock(recognitionLabel, 0.42f, 0.96f, 6);
         }
 
         using var image = SKImage.FromBitmap(stamp);

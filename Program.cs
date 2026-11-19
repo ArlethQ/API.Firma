@@ -5,6 +5,7 @@ using System.Net;
 using API.Firma.Models;
 using API.Firma.Security;
 using API.Firma.Services;
+using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Localization;
 using Microsoft.OpenApi;
@@ -111,7 +112,40 @@ public class Program
                 [new OpenApiSecuritySchemeReference("ApiKey", document, null)] = []
             });
         });
-        builder.Services.AddProblemDetails();
+        builder.Services.AddProblemDetails(options =>
+        {
+            options.CustomizeProblemDetails = context =>
+            {
+                var exception = context.HttpContext.Features
+                    .Get<IExceptionHandlerFeature>()?.Error;
+                if (exception is null
+                    || !context.HttpContext.Request.Path.StartsWithSegments(
+                        "/api/documentos/estampar",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
+                var cause = exception.GetBaseException();
+                var requestId = context.HttpContext.TraceIdentifier;
+                const string diagnosticCode = "STAMP_UNEXPECTED_ERROR";
+                context.ProblemDetails.Title = "No se pudo completar la firma en la API.";
+                var frames = new StackTrace(exception, fNeedFileInfo: false).GetFrames();
+                var origin = new StackTrace(cause, fNeedFileInfo: false).GetFrame(0)
+                    ?? frames.FirstOrDefault();
+                var apiFrame = frames.FirstOrDefault(frame =>
+                    frame.GetMethod()?.DeclaringType?.Assembly == typeof(Program).Assembly);
+                var processBits = Environment.Is64BitProcess ? 64 : 32;
+                // Solo metadatos: se excluyen mensajes, argumentos y rutas de archivos.
+                context.ProblemDetails.Detail =
+                    $"{diagnosticCode}; {exception.GetType().Name}/{cause.GetType().Name}; "
+                    + $"0x{cause.HResult:X8}; origen: {FormatFailureLocation(origin)}; "
+                    + $"API: {FormatFailureLocation(apiFrame)}; {processBits} bits; ref: {requestId}.";
+                context.ProblemDetails.Extensions["diagnosticCode"] = diagnosticCode;
+                context.ProblemDetails.Extensions["requestId"] = requestId;
+                context.HttpContext.Response.Headers["X-Request-ID"] = requestId;
+            };
+        });
         builder.Services.AddSingleton<PdfStampService>();
         builder.Services.AddHttpClient<Rfc3161TimestampService>();
         builder.Services.AddSingleton<UanatacaTrustStore>();
@@ -260,5 +294,28 @@ public class Program
         app.UseRateLimiter();
         app.MapControllers();
         app.Run();
+    }
+
+    private static string FormatFailureLocation(StackFrame? frame)
+    {
+        var method = frame?.GetMethod();
+        if (method?.DeclaringType is not { } type)
+            return "no disponible";
+
+        var methodName = method.Name;
+        if (type.DeclaringType is not null && type.Name.StartsWith('<'))
+        {
+            var separator = type.Name.IndexOf('>');
+            if (separator > 1)
+            {
+                methodName = type.Name[1..separator];
+                type = type.DeclaringType;
+            }
+        }
+
+        var location = $"{type.Name}.{methodName}".Replace('<', '_').Replace('>', '_');
+        if (location.Length > 50)
+            location = location[..50];
+        return $"{location}@{frame!.GetILOffset():X}";
     }
 }

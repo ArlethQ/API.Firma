@@ -37,15 +37,15 @@ public sealed class StampPdfRequest
     [FromForm(Name = "pagina")]
     public int Pagina { get; init; } = 1;
 
-    [Range(0, 2000, ErrorMessage = "X debe estar entre 0 y 2000 mm.")]
+    [Range(0d, 2000d, ErrorMessage = "X debe estar entre 0 y 2000 mm.")]
     [FromForm(Name = "xMm")]
     public double XMm { get; init; } = 10;
 
-    [Range(0, 2000, ErrorMessage = "Y debe estar entre 0 y 2000 mm.")]
+    [Range(0d, 2000d, ErrorMessage = "Y debe estar entre 0 y 2000 mm.")]
     [FromForm(Name = "yMm")]
     public double YMm { get; init; } = 10;
 
-    [Range(40, 160)]
+    [Range(40d, 160d)]
     [FromForm(Name = "anchoMm")]
     public double AnchoMm { get; init; } = 50.3;
 }

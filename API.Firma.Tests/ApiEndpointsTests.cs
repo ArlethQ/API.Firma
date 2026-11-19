@@ -8,6 +8,7 @@ using API.Firma.Services;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PdfSharp.Pdf;
@@ -101,6 +102,92 @@ public sealed class ApiEndpointsTests : IDisposable
         using var response = await client.GetAsync("/api/salud");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Stamp_WithUnexpectedFailure_ReturnsDiagnosticWithoutPrivateDetails(
+        bool wrapped,
+        bool overflow)
+    {
+        const string privateDetails = @"C:\privado\certificado.p12; clave=no-publicar";
+        Exception cause = overflow
+            ? new OverflowException(privateDetails)
+            : new DllNotFoundException(privateDetails);
+        Exception failure = wrapped
+            ? new TypeInitializationException("SkiaSharp.SKSurface", cause)
+            : cause;
+        using var diagnosticFactory = factory.WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services => services.AddSingleton<ILogger<PdfStampService>>(
+                new FailingStampLogger(failure))));
+        using var client = diagnosticFactory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            BaseAddress = new Uri("https://localhost")
+        });
+        client.DefaultRequestHeaders.Add("X-API-Key", ApiKey);
+        using var content = CreateValidRequest();
+
+        using var response = await client.PostAsync("/api/documentos/estampar", content);
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+        var rawBody = await response.Content.ReadAsStringAsync();
+        using var body = JsonDocument.Parse(rawBody);
+        var problem = body.RootElement;
+        Assert.True(problem.TryGetProperty("requestId", out var requestIdValue), rawBody);
+        var requestId = requestIdValue.GetString();
+        Assert.False(string.IsNullOrWhiteSpace(requestId));
+        Assert.Equal(requestId, Assert.Single(response.Headers.GetValues("X-Request-ID")));
+        Assert.Equal("STAMP_UNEXPECTED_ERROR", problem.GetProperty("diagnosticCode").GetString());
+        // E-FACT reenvía detail; el diagnóstico debe ser visible sin consultar otros campos.
+        var detail = problem.GetProperty("detail").GetString();
+        Assert.Contains("STAMP_UNEXPECTED_ERROR", detail);
+        Assert.Contains(failure.GetType().Name, detail);
+        Assert.Contains(cause.GetType().Name, detail);
+        Assert.Contains("API: PdfStampService.StampAsync@", detail);
+        Assert.Contains($"{(Environment.Is64BitProcess ? 64 : 32)} bits", detail);
+        Assert.True(detail!.Length <= 280, detail);
+        Assert.DoesNotContain("<", detail);
+        Assert.DoesNotContain(">", detail);
+        Assert.Contains($"0x{cause.HResult:X8}", detail);
+        Assert.Contains(requestId, detail);
+        Assert.DoesNotContain(privateDetails, rawBody);
+        Assert.DoesNotContain("no-publicar", rawBody);
+        Assert.DoesNotContain("SkiaSharp.SKSurface", rawBody);
+        Assert.DoesNotContain(CertificatePassword, rawBody);
+        Assert.DoesNotContain("stackTrace", rawBody, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("xMm", "6968913839877914")]
+    [InlineData("yMm", "2247834567890123")]
+    [InlineData("anchoMm", "5030000000000000")]
+    [InlineData("xMm", "-0.1")]
+    [InlineData("yMm", "2000.1")]
+    [InlineData("anchoMm", "39.9")]
+    [InlineData("anchoMm", "160.1")]
+    public async Task Stamp_WithOutOfRangeDecimal_ReturnsFieldValidationInsteadOfOverflow(
+        string field,
+        string value)
+    {
+        using var client = CreateClient();
+        client.DefaultRequestHeaders.Add("X-API-Key", ApiKey);
+        using var content = CreateValidRequest(
+            xMm: field == "xMm" ? value : "100",
+            yMm: field == "yMm" ? value : "224.78",
+            anchoMm: field == "anchoMm" ? value : "100");
+
+        using var response = await client.PostAsync("/api/documentos/estampar", content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var rawBody = await response.Content.ReadAsStringAsync();
+        using var body = JsonDocument.Parse(rawBody);
+        Assert.True(body.RootElement.GetProperty("errors").TryGetProperty(field, out _), rawBody);
+        Assert.DoesNotContain("STAMP_UNEXPECTED_ERROR", rawBody);
     }
 
     [Fact]
@@ -374,6 +461,18 @@ public sealed class ApiEndpointsTests : IDisposable
 
     public void Dispose() => factory.Dispose();
 
+    private sealed class FailingStampLogger(Exception failure) : ILogger<PdfStampService>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) => throw failure;
+    }
+
     private HttpClient CreateClient() =>
         factory.CreateClient(new WebApplicationFactoryClientOptions
         {
@@ -393,7 +492,10 @@ public sealed class ApiEndpointsTests : IDisposable
         string? posiciones = null,
         string pdfContentType = "application/pdf",
         byte[]? pdfBytes = null,
-        bool advancedSeal = false)
+        bool advancedSeal = false,
+        string xMm = "100",
+        string yMm = "224.78",
+        string anchoMm = "100")
     {
         var content = new MultipartFormDataContent();
         var pdf = new ByteArrayContent(pdfBytes ?? CreatePdf());
@@ -408,9 +510,9 @@ public sealed class ApiEndpointsTests : IDisposable
         if (advancedSeal)
             content.Add(new StringContent("true"), "selloAvanzado");
         content.Add(new StringContent("1"), "pagina");
-        content.Add(new StringContent("100"), "xMm");
-        content.Add(new StringContent("224.78"), "yMm");
-        content.Add(new StringContent("100"), "anchoMm");
+        content.Add(new StringContent(xMm), "xMm");
+        content.Add(new StringContent(yMm), "yMm");
+        content.Add(new StringContent(anchoMm), "anchoMm");
         if (posiciones is not null)
             content.Add(new StringContent(posiciones), "posiciones");
         return content;
